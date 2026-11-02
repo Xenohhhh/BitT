@@ -302,6 +302,39 @@ void handleClient(
             break;
         }
 
+        
+        // Authentication succeeded.
+
+        string method = request["method"].get<string>();
+
+        // Send an event before the get_status response.
+        if (method == "get_status")
+        {
+            json notification = {
+                {"jsonrpc", "2.0"},
+                {"method", "torrent_state_changed"},
+                {"params", {
+                    {"torrentId", "demo-torrent-1"},
+                    {"state", "downloading"},
+                    {"progress", 0.35}
+                }}
+            };
+
+            // Notification has no "id".
+            if (!sendJson(clientSocket, notification))
+            {
+                cout << "Failed to send notification\n";
+                break;
+            }
+
+            cout << "Notification sent successfully\n";
+        }
+
+        
+
+        cout << "Response sent successfully\n";
+
+
         cout << "Received request:\n"
              << request.dump(4) << "\n";
 

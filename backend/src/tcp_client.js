@@ -78,6 +78,23 @@ function rejectAllPending(error) {
   pendingRequests.clear();
 }
 
+
+function handleNotification(notification) {
+  const { method, params } = notification;
+
+  switch (method) {
+    case "torrent_state_changed":
+      console.log("Torrent state changed:", params);
+
+      // Later, this can update your application's torrent state.
+      break;
+
+    default:
+      console.log("Unknown engine notification:", notification);
+  }
+}
+
+
 client.on("connect", async () => {
   console.log("Connected to C++ engine");
 
@@ -146,27 +163,45 @@ client.on("data", (chunk) => {
       return;
     }
 
-    const pending = pendingRequests.get(response.id);
-
-    if (!pending) {
-      console.error(
-        "Received response with unknown ID:",
-        response.id
-      );
+    
+    // JSON-RPC notification: has a method but no id.
+    if (
+      Object.prototype.hasOwnProperty.call(response, "method") &&
+      !Object.prototype.hasOwnProperty.call(response, "id")
+    ) {
+      handleNotification(response);
       continue;
     }
 
-    pendingRequests.delete(response.id);
+    // JSON-RPC response: has an id.
+    if (Object.prototype.hasOwnProperty.call(response, "id")) {
+      const pending = pendingRequests.get(response.id);
 
-    if (response.error) {
-      pending.reject(
-        new Error(
-          `${response.error.code}: ${response.error.message}`
-        )
-      );
-    } else {
-      pending.resolve(response.result);
+      if (!pending) {
+        console.error(
+          "Received response with unknown ID:",
+          response.id
+        );
+        continue;
+      }
+
+      pendingRequests.delete(response.id);
+
+      if (response.error) {
+        pending.reject(
+          new Error(
+            `${response.error.code}: ${response.error.message}`
+          )
+        );
+      } else {
+        pending.resolve(response.result);
+      }
+
+      continue;
     }
+
+    console.error("Received unrecognized JSON-RPC message:", response);
+
   }
 });
 
