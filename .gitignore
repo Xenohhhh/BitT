@@ -187,4 +187,7 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile
 
+# Test torrent files
+/test-data/
+
 # End of https://www.toptal.com/developers/gitignore/api/c++

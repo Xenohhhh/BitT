@@ -38,3 +38,20 @@ target_link_libraries(libtorrent_smoke
     PRIVATE
         LibtorrentRasterbar::torrent-rasterbar
 )
+
+# Torrent metadata inspection test
+add_executable(metadata_test
+    src/metadata_test.cpp
+    src/torrent_metadata.cpp
+)
+
+target_include_directories(metadata_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(metadata_test
+    PRIVATE
+        LibtorrentRasterbar::torrent-rasterbar
+        nlohmann_json::nlohmann_json
+)
