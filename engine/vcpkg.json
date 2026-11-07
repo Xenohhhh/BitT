@@ -1,0 +1,8 @@
+{
+  "name": "bittorrent-engine",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "libtorrent",
+    "nlohmann-json"
+  ]
+}

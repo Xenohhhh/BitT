@@ -179,4 +179,12 @@ BitTorrent_Client_PRD.docx
 *.out
 *.app
 
+# Generated CMake / build / dependency install output
+**/build/
+**/vcpkg_installed/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
 # End of https://www.toptal.com/developers/gitignore/api/c++

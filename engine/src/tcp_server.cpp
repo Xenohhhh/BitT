@@ -456,7 +456,7 @@ int main()
     serverAddr.sin_port = htons(5000);
 
     // 5. Bind.
-    if (bind(
+    if (::bind(
             listenSocket,
             reinterpret_cast<sockaddr*>(&serverAddr),
             sizeof(serverAddr)

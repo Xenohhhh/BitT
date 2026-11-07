@@ -1,14 +1,40 @@
-cmake_minimum_required(VERSION 3.16)
-project(bitt_engine LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.20)
 
-add_executable(tcp_server src/tcp_server.cpp)
-target_include_directories(tcp_server PRIVATE src)
-target_compile_features(tcp_server PRIVATE cxx_std_14)
-target_compile_definitions(tcp_server PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(tcp_server PRIVATE ws2_32)
+project(BitTEngine LANGUAGES CXX)
 
-if(MSVC)
-    target_compile_options(tcp_server PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(tcp_server PRIVATE -Wall -Wextra -Wpedantic)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Find dependencies
+find_package(LibtorrentRasterbar CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
+
+# Existing TCP IPC server
+add_executable(tcp_server
+    src/tcp_server.cpp
+)
+
+target_include_directories(tcp_server
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(tcp_server
+    PRIVATE
+        nlohmann_json::nlohmann_json
+)
+
+if(WIN32)
+    target_link_libraries(tcp_server PRIVATE ws2_32)
 endif()
+
+# Separate libtorrent initialization test
+add_executable(libtorrent_smoke
+    src/libtorrent_smoke.cpp
+)
+
+target_link_libraries(libtorrent_smoke
+    PRIVATE
+        LibtorrentRasterbar::torrent-rasterbar
+)
