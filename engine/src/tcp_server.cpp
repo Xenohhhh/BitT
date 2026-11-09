@@ -5,7 +5,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <nlohmann/json.hpp>
+#include "torrent_metadata.hpp"
+#include "torrent_manager.hpp"
+
 
 using namespace std;
 using json = nlohmann::json;
@@ -24,9 +28,8 @@ enum class RecvStatus
 // Does not read beyond the current header or payload.
 RecvStatus recvExact(
     SOCKET sock,
-    char* buffer,
-    int length
-)
+    char *buffer,
+    int length)
 {
     int totalReceived = 0;
 
@@ -36,8 +39,7 @@ RecvStatus recvExact(
             sock,
             buffer + totalReceived,
             length - totalReceived,
-            0
-        );
+            0);
 
         if (bytesReceived == 0)
         {
@@ -61,9 +63,8 @@ RecvStatus recvExact(
 // Send all bytes, handling partial sends.
 bool sendAll(
     SOCKET sock,
-    const char* data,
-    int length
-)
+    const char *data,
+    int length)
 {
     int totalSent = 0;
 
@@ -73,8 +74,7 @@ bool sendAll(
             sock,
             data + totalSent,
             length - totalSent,
-            0
-        );
+            0);
 
         if (bytesSent == SOCKET_ERROR)
         {
@@ -99,17 +99,15 @@ bool sendAll(
 // Receive one complete length-prefixed JSON frame.
 bool receiveJson(
     SOCKET sock,
-    json& message
-)
+    json &message)
 {
     // 1. Receive exactly 4 bytes for the header.
     uint32_t networkLength = 0;
 
     RecvStatus headerStatus = recvExact(
         sock,
-        reinterpret_cast<char*>(&networkLength),
-        HEADER_SIZE
-    );
+        reinterpret_cast<char *>(&networkLength),
+        HEADER_SIZE);
 
     if (headerStatus != RecvStatus::Success)
     {
@@ -140,8 +138,7 @@ bool receiveJson(
     RecvStatus payloadStatus = recvExact(
         sock,
         &payload[0],
-        static_cast<int>(payloadLength)
-    );
+        static_cast<int>(payloadLength));
 
     if (payloadStatus != RecvStatus::Success)
     {
@@ -158,7 +155,7 @@ bool receiveJson(
     {
         message = json::parse(payload);
     }
-    catch (const json::exception& e)
+    catch (const json::exception &e)
     {
         cout << "JSON parse failed: "
              << e.what() << "\n";
@@ -172,8 +169,7 @@ bool receiveJson(
 // Serialize JSON and send a framed response.
 bool sendJson(
     SOCKET sock,
-    const json& message
-)
+    const json &message)
 {
     string payload = message.dump();
 
@@ -191,9 +187,8 @@ bool sendJson(
     // Send header.
     if (!sendAll(
             sock,
-            reinterpret_cast<const char*>(&networkLength),
-            HEADER_SIZE
-        ))
+            reinterpret_cast<const char *>(&networkLength),
+            HEADER_SIZE))
     {
         return false;
     }
@@ -202,15 +197,13 @@ bool sendJson(
     return sendAll(
         sock,
         payload.data(),
-        static_cast<int>(payload.size())
-    );
+        static_cast<int>(payload.size()));
 }
 
 // Compare tokens without early exit on differing characters.
 bool constantTimeEqual(
-    const string& a,
-    const string& b
-)
+    const string &a,
+    const string &b)
 {
     if (a.size() != b.size())
     {
@@ -229,65 +222,267 @@ bool constantTimeEqual(
 }
 
 json makeError(
-    const json& id,
+    const json &id,
     int code,
-    const string& message
-)
+    const string &message)
 {
     return {
         {"jsonrpc", "2.0"},
         {"id", id},
-        {"error", {
-            {"code", code},
-            {"message", message}
-        }}
-    };
+        {"error", {{"code", code}, {"message", message}}}};
 }
 
 // Validate basic JSON-RPC request structure.
-bool isValidRequest(const json& request)
+bool isValidRequest(const json &request)
 {
-    return request.is_object()
-        && request.value("jsonrpc", string()) == "2.0"
-        && request.contains("id")
-        && request.contains("method")
-        && request["method"].is_string()
-        && (!request.contains("params")
-            || request["params"].is_object()
-            || request["params"].is_array());
+    return request.is_object() && request.value("jsonrpc", string()) == "2.0" && request.contains("id") && request.contains("method") && request["method"].is_string() && (!request.contains("params") || request["params"].is_object() || request["params"].is_array());
+}
+
+// Read a JSON torrent ID without allowing negative or out-of-range values.
+// Accepts only integral JSON values in the uint32_t range.
+bool getTorrentIdParam(
+    const json &params,
+    std::uint32_t &torrentId)
+{
+    if (!params.is_object() || !params.contains("torrentId"))
+    {
+        return false;
+    }
+
+    const json &value = params["torrentId"];
+    constexpr std::uint64_t maxTorrentId =
+    (std::numeric_limits<std::uint32_t>::max)();
+
+    if (value.is_number_unsigned())
+    {
+        const std::uint64_t parsed = value.get<std::uint64_t>();
+
+        if (parsed > maxTorrentId)
+        {
+            return false;
+        }
+
+        torrentId = static_cast<std::uint32_t>(parsed);
+        return true;
+    }
+
+    if (value.is_number_integer())
+    {
+        const std::int64_t parsed = value.get<std::int64_t>();
+
+        if (parsed < 0 ||
+            static_cast<std::uint64_t>(parsed) > maxTorrentId)
+        {
+            return false;
+        }
+
+        torrentId = static_cast<std::uint32_t>(parsed);
+        return true;
+    }
+
+    // Reject floats, strings, booleans, null, arrays, and objects.
+    return false;
 }
 
 // Process a single authenticated request.
-json processRequest(const json& request)
+
+json processRequest(
+    const json &request,
+    TorrentManager &manager)
 {
     json id = request["id"];
     string method = request["method"].get<string>();
+
+    json params = request.value("params", json::object());
 
     if (method == "get_status")
     {
         return {
             {"jsonrpc", "2.0"},
             {"id", id},
-            {"result", {
-                {"status", "UP"},
-                {"message", "Hello from C++ engine"}
-            }}
-        };
+            {"result", {{"status", "UP"}, {"message", "Hello from C++ engine"}}}};
+    }
+
+    // Inspect torrent metadata.
+    if (method == "inspect_torrent")
+    {
+        if (!params.is_object() ||
+            !params.contains("torrentPath") ||
+            !params["torrentPath"].is_string() ||
+            params["torrentPath"].get<string>().empty())
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: valid torrentPath is required");
+        }
+
+        json result = inspectTorrent(
+            params["torrentPath"].get<string>());
+
+        return {
+            {"jsonrpc", "2.0"},
+            {"id", id},
+            {"result", result}};
+    }
+
+    // Add torrent.
+    if (method == "add_torrent")
+    {
+        if (!params.is_object() ||
+            !params.contains("torrentPath") ||
+            !params.contains("savePath") ||
+            !params["torrentPath"].is_string() ||
+            !params["savePath"].is_string() ||
+            params["torrentPath"].get<string>().empty() ||
+            params["savePath"].get<string>().empty())
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: torrentPath and savePath are required");
+        }
+
+        try
+        {
+            lt::torrent_handle handle = manager.addTorrent(
+                params["torrentPath"].get<string>(),
+                params["savePath"].get<string>());
+
+            return {
+                {"jsonrpc", "2.0"},
+                {"id", id},
+                {"result", {
+                    {"success", true},
+                    {"torrentId", static_cast<std::uint32_t>(handle.id())},
+                    {"name", handle.status().name}
+                }}
+            };
+        }
+        catch (const std::exception &e)
+        {
+            return makeError(id, -32000, e.what());
+        }
+    }
+
+    // Get torrent status.
+    if (method == "get_torrent_status")
+    {
+        std::uint32_t torrentId = 0;
+        if (!getTorrentIdParam(params, torrentId))
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: torrentId must be an integer between 0 and UINT32_MAX");
+        }
+
+        try
+        {
+            return {
+                {"jsonrpc", "2.0"},
+                {"id", id},
+                {"result", manager.getTorrentStatus(torrentId)}};
+        }
+        catch (const std::exception &e)
+        {
+            return makeError(id, -32000, e.what());
+        }
+    }
+
+    // Pause torrent.
+    if (method == "pause_torrent")
+    {
+        std::uint32_t torrentId = 0;
+        if (!getTorrentIdParam(params, torrentId))
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: torrentId must be an integer between 0 and UINT32_MAX");
+        }
+
+        try
+        {
+            manager.pauseTorrent(torrentId);
+
+            return {
+                {"jsonrpc", "2.0"},
+                {"id", id},
+                {"result", {{"success", true}, {"message", "Pause request submitted"}}}};
+        }
+        catch (const std::exception &e)
+        {
+            return makeError(id, -32000, e.what());
+        }
+    }
+
+    // Resume torrent.
+    if (method == "resume_torrent")
+    {
+        std::uint32_t torrentId = 0;
+        if (!getTorrentIdParam(params, torrentId))
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: torrentId must be an integer between 0 and UINT32_MAX");
+        }
+
+        try
+        {
+            manager.resumeTorrent(torrentId);
+
+            return {
+                {"jsonrpc", "2.0"},
+                {"id", id},
+                {"result", {{"success", true}, {"message", "Resume request submitted"}}}};
+        }
+        catch (const std::exception &e)
+        {
+            return makeError(id, -32000, e.what());
+        }
+    }
+
+    // Remove torrent.
+    if (method == "remove_torrent")
+    {
+        std::uint32_t torrentId = 0;
+        if (!getTorrentIdParam(params, torrentId))
+        {
+            return makeError(
+                id,
+                -32602,
+                "Invalid params: torrentId must be an integer between 0 and UINT32_MAX");
+        }
+
+        try
+        {
+            manager.removeTorrent(torrentId);
+
+            return {
+                {"jsonrpc", "2.0"},
+                {"id", id},
+                {"result", {{"success", true}, {"message", "Torrent removed successfully"}}}};
+        }
+        catch (const std::exception &e)
+        {
+            return makeError(id, -32000, e.what());
+        }
     }
 
     // Unknown method.
     return makeError(
         id,
         -32601,
-        "Method not found"
-    );
+        "Method not found");
 }
 
 // Handle one connected client until disconnect/error.
 void handleClient(
     SOCKET clientSocket,
-    const string& expectedToken
-)
+    const string &expectedToken,
+    TorrentManager &manager)
 {
     cout << "Client connected\n";
 
@@ -302,50 +497,13 @@ void handleClient(
             break;
         }
 
-        
-        // Authentication succeeded.
-
-        string method = request["method"].get<string>();
-
-        // Send an event before the get_status response.
-        if (method == "get_status")
-        {
-            json notification = {
-                {"jsonrpc", "2.0"},
-                {"method", "torrent_state_changed"},
-                {"params", {
-                    {"torrentId", "demo-torrent-1"},
-                    {"state", "downloading"},
-                    {"progress", 0.35}
-                }}
-            };
-
-            // Notification has no "id".
-            if (!sendJson(clientSocket, notification))
-            {
-                cout << "Failed to send notification\n";
-                break;
-            }
-
-            cout << "Notification sent successfully\n";
-        }
-
-        
-
-        cout << "Response sent successfully\n";
-
-
-        cout << "Received request:\n"
-             << request.dump(4) << "\n";
-
-        // Validate JSON-RPC structure.
+        // Validate JSON-RPC structure before accessing request fields.
         if (!isValidRequest(request))
         {
             json errorResponse = makeError(
                 request.value("id", json(nullptr)),
                 -32600,
-                "Invalid Request"
-            );
+                "Invalid Request");
 
             sendJson(clientSocket, errorResponse);
             break;
@@ -358,8 +516,7 @@ void handleClient(
             json errorResponse = makeError(
                 request["id"],
                 -32001,
-                "Unauthorized: token missing"
-            );
+                "Unauthorized: token missing");
 
             sendJson(clientSocket, errorResponse);
             break;
@@ -370,22 +527,26 @@ void handleClient(
 
         if (!constantTimeEqual(
                 receivedToken,
-                expectedToken
-            ))
+                expectedToken))
         {
             json errorResponse = makeError(
                 request["id"],
                 -32001,
-                "Unauthorized: invalid token"
-            );
+                "Unauthorized: invalid token");
 
             sendJson(clientSocket, errorResponse);
             break;
         }
 
-        // Authentication succeeded.
-        // Only now execute the requested method.
-        json response = processRequest(request);
+        // Authentication succeeded. Log the request without exposing the token.
+        json loggedRequest = request;
+        loggedRequest.erase("token");
+
+        cout << "Received authenticated request:\n"
+             << loggedRequest.dump(4) << "\n";
+
+        // Only authenticated requests reach the method dispatcher.
+        json response = processRequest(request, manager);
 
         if (!sendJson(clientSocket, response))
         {
@@ -406,7 +567,7 @@ void handleClient(
 int main()
 {
     // 1. Load the shared IPC secret.
-    const char* tokenEnv = getenv("BITT_IPC_TOKEN");
+    const char *tokenEnv = getenv("BITT_IPC_TOKEN");
 
     if (tokenEnv == nullptr || strlen(tokenEnv) == 0)
     {
@@ -421,8 +582,7 @@ int main()
 
     int result = WSAStartup(
         MAKEWORD(2, 2),
-        &wsaData
-    );
+        &wsaData);
 
     if (result != 0)
     {
@@ -435,8 +595,7 @@ int main()
     SOCKET listenSocket = socket(
         AF_INET,
         SOCK_STREAM,
-        IPPROTO_TCP
-    );
+        IPPROTO_TCP);
 
     if (listenSocket == INVALID_SOCKET)
     {
@@ -458,9 +617,8 @@ int main()
     // 5. Bind.
     if (::bind(
             listenSocket,
-            reinterpret_cast<sockaddr*>(&serverAddr),
-            sizeof(serverAddr)
-        ) == SOCKET_ERROR)
+            reinterpret_cast<sockaddr *>(&serverAddr),
+            sizeof(serverAddr)) == SOCKET_ERROR)
     {
         cerr << "Bind failed: "
              << WSAGetLastError() << "\n";
@@ -473,8 +631,7 @@ int main()
     // 6. Listen.
     if (listen(
             listenSocket,
-            SOMAXCONN
-        ) == SOCKET_ERROR)
+            SOMAXCONN) == SOCKET_ERROR)
     {
         cerr << "Listen failed: "
              << WSAGetLastError() << "\n";
@@ -486,14 +643,16 @@ int main()
 
     cout << "Engine listening on 127.0.0.1:5000\n";
 
+    // One manager (and one libtorrent session) for the engine lifetime.
+    TorrentManager manager;
+
     // 7. Accept clients repeatedly.
     while (true)
     {
         SOCKET clientSocket = accept(
             listenSocket,
             nullptr,
-            nullptr
-        );
+            nullptr);
 
         if (clientSocket == INVALID_SOCKET)
         {
@@ -502,7 +661,10 @@ int main()
             break;
         }
 
-        handleClient(clientSocket, expectedToken);
+        handleClient(
+            clientSocket,
+            expectedToken,
+            manager);
 
         cout << "Waiting for next client...\n";
     }

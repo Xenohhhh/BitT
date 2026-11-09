@@ -179,6 +179,25 @@ BitTorrent_Client_PRD.docx
 *.out
 *.app
 
+# C++ test executables
+engine/build/torrent_info_test.exe
+engine/build/torrent_add_test.exe
+
+# Build artifacts
+engine/build/
+
+# Test download data
+test-downloads/
+
+# Temporary Node.js integration tests
+/test-inspect.js
+/test-status.js
+/test-invalid-ids.js
+/test-torrent-lifecycle.js
+
+# Temporary C++ test executables
+engine/src/*.exe
+
 # Generated CMake / build / dependency install output
 **/build/
 **/vcpkg_installed/
