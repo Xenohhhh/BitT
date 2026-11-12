@@ -5,6 +5,7 @@ const HOST = "127.0.0.1";
 const PORT = 5000;
 const MAX_PAYLOAD = 1024 * 1024;
 const HEADER_SIZE = 4;
+const REQUEST_TIMEOUT_MS = 5000;
 
 const token = process.env.BITT_IPC_TOKEN;
 
@@ -38,7 +39,7 @@ function createFrame(message) {
   return Buffer.concat([header, payload]);
 }
 
-function sendRequest(method, params = {}) {
+function sendRequest(method, params = {}, timeout = REQUEST_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const id = nextId++;
 
@@ -59,19 +60,25 @@ function sendRequest(method, params = {}) {
       return;
     }
 
-    pendingRequests.set(id, { resolve, reject });
+    pendingRequests.set(id, { resolve, reject, timer });
 
     client.write(frame, (err) => {
       if (err) {
-        pendingRequests.delete(id);
-        reject(err);
+        const pending = pendingRequests.get(id);
+        
+        if(!pending) return;
+
+        clearTimeout(pending.timer)
+        pendingRequests.delete(id)
+        pending.reject(err)
       }
     });
   });
 }
 
 function rejectAllPending(error) {
-  for (const { reject } of pendingRequests.values()) {
+  for (const { reject, timer } of pendingRequests.values()) {
+    clearTimeout(timer)
     reject(error);
   }
 
@@ -184,7 +191,8 @@ client.on("data", (chunk) => {
         );
         continue;
       }
-
+      
+      clearTimeout(pending.timer);
       pendingRequests.delete(response.id);
 
       if (response.error) {
@@ -211,6 +219,8 @@ client.on("end", () => {
   if (receiveBuffer.length !== 0) {
     console.error("Connection ended with an incomplete frame");
   }
+
+  rejectAllPending(new Error("Server ended the connection"));
 });
 
 client.on("error", (err) => {
