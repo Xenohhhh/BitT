@@ -1,6 +1,10 @@
 
 const net = require("net");
 
+const { createComponentLogger } = require("./observability/logger");
+
+const log = createComponentLogger("ipc");
+
 const HOST = "127.0.0.1";
 const PORT = 5000;
 const MAX_PAYLOAD = 1024 * 1024;
@@ -14,6 +18,7 @@ let receiveBuffer = Buffer.alloc(0);
 let nextId = 1;
 
 const pendingRequests = new Map();
+
 
 function createFrame(message) {
   const payload = Buffer.from(
@@ -31,23 +36,41 @@ function createFrame(message) {
   return Buffer.concat([header, payload]);
 }
 
+
 function rejectAllPending(error) {
+  const rejectedCount = pendingRequests.size;
+
   for (const { reject, timer } of pendingRequests.values()) {
     clearTimeout(timer);
     reject(error);
   }
 
   pendingRequests.clear();
+
+  if (rejectedCount > 0) {
+    log.warn(
+      {
+        event: "pending_requests_rejected",
+        count: rejectedCount,
+        error_message: error.message
+      },
+      "All pending IPC requests rejected"
+    );
+  }
 }
+
 
 function handleEngineCrash(error) {
   const crashError = error instanceof Error
     ? error
     : new Error("C++ engine terminated unexpectedly");
 
-  console.error(
-    "Handling engine crash in TCP client:",
-    crashError.message
+  log.error(
+    {
+      event: "engine_crash_handled",
+      error: crashError
+    },
+    "Handling engine crash in TCP client"
   );
 
   // Prevent any new requests.
@@ -62,18 +85,32 @@ function handleEngineCrash(error) {
   }
 }
 
+
 function handleNotification(notification) {
   const { method, params } = notification;
 
   switch (method) {
     case "torrent_state_changed":
-      console.log("Torrent state changed:", params);
+      log.info(
+        {
+          event: "torrent_state_changed",
+          params
+        },
+        "Torrent state changed"
+      );
       break;
 
     default:
-      console.log("Unknown engine notification:", notification);
+      log.warn(
+        {
+          event: "unknown_engine_notification",
+          method
+        },
+        "Received unknown engine notification"
+      );
   }
 }
+
 
 function handleData(chunk) {
   receiveBuffer = Buffer.concat([
@@ -92,7 +129,15 @@ function handleData(chunk) {
         `Invalid response payload length: ${payloadLength}`
       );
 
-      console.error(error.message);
+      log.error(
+        {
+          event: "invalid_response_frame",
+          payload_length: payloadLength,
+          max_payload: MAX_PAYLOAD
+        },
+        error.message
+      );
+
       rejectAllPending(error);
       client.destroy();
       return;
@@ -118,7 +163,14 @@ function handleData(chunk) {
     } catch (err) {
       const error = new Error("Invalid JSON response");
 
-      console.error(error.message);
+      log.error(
+        {
+          event: "invalid_json_response",
+          err
+        },
+        error.message
+      );
+
       rejectAllPending(error);
       client.destroy();
       return;
@@ -138,35 +190,66 @@ function handleData(chunk) {
       const pending = pendingRequests.get(response.id);
 
       if (!pending) {
-        console.error(
-          "Received response with unknown ID:",
-          response.id
+        log.warn(
+          {
+            event: "unknown_response_id",
+            request_id: response.id
+          },
+          "Received response with unknown request ID"
         );
+
         continue;
       }
 
       clearTimeout(pending.timer);
       pendingRequests.delete(response.id);
 
+      const durationMs = Date.now() - pending.startedAt;
+
       if (response.error) {
-        pending.reject(
-          new Error(
-            `${response.error.code}: ${response.error.message}`
-          )
+        const error = new Error(
+          `${response.error.code}: ${response.error.message}`
         );
+
+        log.error(
+          {
+            event: "ipc_request_failed",
+            request_id: response.id,
+            method: pending.method,
+            duration_ms: durationMs,
+            error_code: response.error.code,
+            error_message: response.error.message
+          },
+          "IPC request returned an error"
+        );
+
+        pending.reject(error);
       } else {
+        log.debug(
+          {
+            event: "ipc_response_received",
+            request_id: response.id,
+            method: pending.method,
+            duration_ms: durationMs
+          },
+          "IPC response received"
+        );
+
         pending.resolve(response.result);
       }
 
       continue;
     }
 
-    console.error(
-      "Received unrecognized JSON-RPC message:",
-      response
+    log.warn(
+      {
+        event: "unrecognized_json_rpc_message"
+      },
+      "Received unrecognized JSON-RPC message"
     );
   }
 }
+
 
 function connectToEngine() {
   if (connectionState === "CONNECTED") {
@@ -193,6 +276,15 @@ function connectToEngine() {
   receiveBuffer = Buffer.alloc(0);
   nextId = 1;
 
+  log.info(
+    {
+      event: "ipc_connection_started",
+      host: HOST,
+      port: PORT
+    },
+    "Connecting to C++ engine"
+  );
+
   client = net.createConnection({
     host: HOST,
     port: PORT
@@ -203,7 +295,15 @@ function connectToEngine() {
 
     client.on("connect", () => {
       connectionState = "CONNECTED";
-      console.log("Connected to C++ engine");
+
+      log.info(
+        {
+          event: "ipc_connected",
+          host: HOST,
+          port: PORT
+        },
+        "Connected to C++ engine"
+      );
 
       connectionSettled = true;
       resolve(client);
@@ -214,13 +314,14 @@ function connectToEngine() {
     client.on("end", () => {
       connectionState = "DISCONNECTED";
 
-      console.log("Server ended its sending stream");
-
-      if (receiveBuffer.length !== 0) {
-        console.error(
-          "Connection ended with an incomplete frame"
-        );
-      }
+      log.warn(
+        {
+          event: "ipc_server_ended_stream",
+          incomplete_frame: receiveBuffer.length !== 0,
+          remaining_buffer_bytes: receiveBuffer.length
+        },
+        "Server ended its sending stream"
+      );
 
       rejectAllPending(
         new Error("Server ended the connection")
@@ -230,7 +331,14 @@ function connectToEngine() {
     client.on("error", (err) => {
       connectionState = "DISCONNECTED";
 
-      console.error("Socket error:", err.message);
+      log.error(
+        {
+          event: "ipc_socket_error",
+          err
+        },
+        "IPC socket error"
+      );
+
       rejectAllPending(err);
 
       if (!connectionSettled) {
@@ -242,7 +350,12 @@ function connectToEngine() {
     client.on("close", () => {
       connectionState = "DISCONNECTED";
 
-      console.log("Connection closed");
+      log.info(
+        {
+          event: "ipc_connection_closed"
+        },
+        "IPC connection closed"
+      );
 
       rejectAllPending(
         new Error("Connection closed")
@@ -256,6 +369,7 @@ function connectToEngine() {
   });
 }
 
+
 function sendRequest(
   method,
   params = {},
@@ -267,11 +381,20 @@ function sendRequest(
       !client ||
       !client.writable
     ) {
-      reject(
-        new Error(
-          `Cannot send request: socket is ${connectionState}`
-        )
+      const error = new Error(
+        `Cannot send request: socket is ${connectionState}`
       );
+
+      log.warn(
+        {
+          event: "ipc_request_rejected",
+          method,
+          connection_state: connectionState
+        },
+        error.message
+      );
+
+      reject(error);
       return;
     }
 
@@ -290,9 +413,21 @@ function sendRequest(
     try {
       frame = createFrame(request);
     } catch (err) {
+      log.error(
+        {
+          event: "ipc_request_serialization_failed",
+          request_id: id,
+          method,
+          err
+        },
+        "Failed to serialize IPC request"
+      );
+
       reject(err);
       return;
     }
+
+    const startedAt = Date.now();
 
     const timer = setTimeout(() => {
       const pending = pendingRequests.get(id);
@@ -301,18 +436,43 @@ function sendRequest(
 
       pendingRequests.delete(id);
 
-      pending.reject(
-        new Error(
-          `Request ${id} timed out after ${timeout}ms`
-        )
+      const durationMs = Date.now() - pending.startedAt;
+
+      const error = new Error(
+        `Request ${id} timed out after ${timeout}ms`
       );
+
+      log.warn(
+        {
+          event: "ipc_request_timeout",
+          request_id: id,
+          method,
+          timeout_ms: timeout,
+          duration_ms: durationMs
+        },
+        error.message
+      );
+
+      pending.reject(error);
     }, timeout);
 
     pendingRequests.set(id, {
       resolve,
       reject,
-      timer
+      timer,
+      method,
+      startedAt
     });
+
+    log.debug(
+      {
+        event: "ipc_request_sent",
+        request_id: id,
+        method,
+        timeout_ms: timeout
+      },
+      "IPC request sent"
+    );
 
     client.write(frame, (err) => {
       if (err) {
@@ -322,11 +482,23 @@ function sendRequest(
 
         clearTimeout(pending.timer);
         pendingRequests.delete(id);
+
+        log.error(
+          {
+            event: "ipc_write_failed",
+            request_id: id,
+            method,
+            err
+          },
+          "Failed to write IPC request"
+        );
+
         pending.reject(err);
       }
     });
   });
 }
+
 
 function shutdownEngine() {
   return sendRequest("shutdown_engine");
@@ -341,6 +513,14 @@ function disconnect(timeout = 1000) {
 
   const socket = client;
 
+  log.info(
+    {
+      event: "ipc_disconnect_started",
+      timeout_ms: timeout
+    },
+    "Disconnecting from C++ engine"
+  );
+
   return new Promise((resolve) => {
     let settled = false;
 
@@ -352,14 +532,26 @@ function disconnect(timeout = 1000) {
       socket.removeListener("close", finish);
 
       connectionState = "DISCONNECTED";
+
+      log.info(
+        {
+          event: "ipc_disconnect_completed"
+        },
+        "IPC disconnection completed"
+      );
+
       resolve();
     }
 
     socket.once("close", finish);
 
     const timer = setTimeout(() => {
-      console.warn(
-        "TCP connection did not close in time. Destroying socket."
+      log.warn(
+        {
+          event: "ipc_disconnect_timeout",
+          timeout_ms: timeout
+        },
+        "TCP connection did not close in time. Destroying socket"
       );
 
       socket.destroy();
@@ -378,6 +570,7 @@ function disconnect(timeout = 1000) {
 function getConnectionState() {
   return connectionState;
 }
+
 
 module.exports = {
   connectToEngine,

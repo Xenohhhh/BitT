@@ -1,9 +1,14 @@
+
 const { spawn } = require("child_process");
 const path = require("path");
 const readline = require("readline");
-const ipcClient = require("./tcp_client");
 const EventEmitter = require("events");
 
+const ipcClient = require("./tcp_client");
+
+const { createComponentLogger } = require("./observability/logger");
+
+const log = createComponentLogger("process-manager");
 const processEvents = new EventEmitter();
 
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
@@ -88,7 +93,14 @@ function startEngine() {
         `C++ engine failed to become ready within ${STARTUP_TIMEOUT_MS}ms`
       );
 
-      console.error(error.message);
+      log.error(
+        {
+          event: "engine_startup_timeout",
+          pid: child.pid,
+          timeout_ms: STARTUP_TIMEOUT_MS
+        },
+        error.message
+      );
 
       rejectStartup(error);
       processState = "STOPPING";
@@ -96,15 +108,25 @@ function startEngine() {
       const signalSent = child.kill("SIGTERM");
 
       if (!signalSent) {
-        console.warn(
+        log.warn(
+          {
+            event: "engine_termination_signal_failed",
+            pid: child.pid,
+            signal: "SIGTERM"
+          },
           "Could not send termination signal to unready engine"
         );
       }
 
       forceKillTimer = setTimeout(() => {
         if (engineProcess === child) {
-          console.warn(
-            "Unready engine did not terminate. Forcing termination."
+          log.warn(
+            {
+              event: "engine_startup_force_kill",
+              pid: child.pid,
+              timeout_ms: STARTUP_FORCE_KILL_MS
+            },
+            "Unready engine did not terminate. Forcing termination"
           );
 
           child.kill("SIGKILL");
@@ -119,7 +141,15 @@ function startEngine() {
     });
 
     stdoutReader.on("line", (line) => {
-      console.log(`[C++ stdout] ${line}`);
+      // Preserve the original engine output as structured logs.
+      log.info(
+        {
+          event: "engine_stdout",
+          pid: child.pid,
+          output: line
+        },
+        "C++ engine output"
+      );
 
       if (
         line.trim() === "ENGINE_READY" &&
@@ -127,7 +157,11 @@ function startEngine() {
       ) {
         processState = "READY";
 
-        console.log(
+        log.info(
+          {
+            event: "engine_ready",
+            pid: child.pid
+          },
           "C++ engine is ready to accept connections"
         );
 
@@ -141,27 +175,52 @@ function startEngine() {
     });
 
     stderrReader.on("line", (line) => {
-      console.error(`[C++ stderr] ${line}`);
+      log.error(
+        {
+          event: "engine_stderr",
+          pid: child.pid,
+          output: line
+        },
+        "C++ engine error output"
+      );
     });
 
     // Event 1: Process successfully created.
     child.once("spawn", () => {
-      console.log(
-        `C++ engine process created. PID: ${child.pid}`
+      log.info(
+        {
+          event: "engine_process_created",
+          pid: child.pid,
+          executable: ENGINE_EXECUTABLE
+        },
+        "C++ engine process created"
       );
     });
 
     // Event 2: Process-related error.
     child.on("error", (err) => {
-      console.error("C++ process error:", err.message);
+      log.error(
+        {
+          event: "engine_process_error",
+          pid: child.pid,
+          err
+        },
+        "C++ process error"
+      );
 
       rejectStartup(err);
     });
 
     // Event 3: Process terminated.
     child.once("exit", (code, signal) => {
-      console.log(
-        `C++ engine exited. Exit code: ${code}, Signal: ${signal}`
+      log.info(
+        {
+          event: "engine_process_exit",
+          pid: child.pid,
+          exit_code: code,
+          signal
+        },
+        "C++ engine process exited"
       );
 
       const unexpectedExit = processState !== "STOPPING";
@@ -176,7 +235,13 @@ function startEngine() {
           message: "C++ engine terminated unexpectedly"
         };
 
-        console.error(failure.message);
+        log.error(
+          {
+            event: "engine_crash",
+            ...failure
+          },
+          failure.message
+        );
 
         // Immediately clean up IPC and reject pending requests.
         ipcClient.handleEngineCrash(
@@ -196,8 +261,14 @@ function startEngine() {
 
     // Event 4: Process and stdio streams closed.
     child.once("close", (code, signal) => {
-      console.log(
-        `C++ engine closed. Exit code: ${code}, Signal: ${signal}`
+      log.info(
+        {
+          event: "engine_process_closed",
+          pid: child.pid,
+          exit_code: code,
+          signal
+        },
+        "C++ engine process and stdio streams closed"
       );
 
       clearTimeout(forceKillTimer);
@@ -217,7 +288,6 @@ function startEngine() {
     });
   });
 }
-
 
 
 function stopEngine() {
@@ -245,6 +315,14 @@ function stopEngine() {
 
   processState = "STOPPING";
 
+  log.info(
+    {
+      event: "engine_shutdown_started",
+      pid: child.pid
+    },
+    "Engine shutdown initiated"
+  );
+
   shutdownPromise = (async () => {
     let forceKillTimer;
     let finalTimer;
@@ -264,16 +342,25 @@ function stopEngine() {
           return;
         }
 
-        console.warn(
-          "Engine did not close in time. Forcing termination..."
+        log.warn(
+          {
+            event: "engine_force_kill",
+            pid: child.pid,
+            timeout_ms: SHUTDOWN_TIMEOUT_MS
+          },
+          "Engine did not close in time. Forcing termination"
         );
 
         try {
           child.kill("SIGKILL");
         } catch (err) {
-          console.error(
-            "Force termination failed:",
-            err.message
+          log.error(
+            {
+              event: "engine_force_kill_failed",
+              pid: child.pid,
+              err
+            },
+            "Force termination failed"
           );
         }
 
@@ -301,14 +388,22 @@ function stopEngine() {
         );
       }
 
-      console.log(
+      log.info(
+        {
+          event: "engine_shutdown_acknowledged",
+          pid: child.pid
+        },
         "C++ engine accepted shutdown request"
       );
 
     } catch (err) {
-      console.error(
-        "Graceful shutdown request failed:",
-        err.message
+      log.error(
+        {
+          event: "graceful_shutdown_failed",
+          pid: child.pid,
+          err
+        },
+        "Graceful shutdown request failed"
       );
 
       // Fall back to OS-level termination.
@@ -330,7 +425,15 @@ function stopEngine() {
         );
       }
 
-      console.log("Engine shutdown completed");
+      log.info(
+        {
+          event: "engine_shutdown_completed",
+          pid: child.pid,
+          exit_code: result.code,
+          signal: result.signal
+        },
+        "Engine shutdown completed"
+      );
 
       return result;
 
@@ -344,9 +447,12 @@ function stopEngine() {
     try {
       await ipcClient.disconnect();
     } catch (err) {
-      console.error(
-        "IPC connection cleanup failed:",
-        err.message
+      log.error(
+        {
+          event: "ipc_cleanup_failed",
+          err
+        },
+        "IPC connection cleanup failed"
       );
     }
 
@@ -376,6 +482,7 @@ function onEngineCrash(callback) {
     processEvents.off("engineCrash", callback);
   };
 }
+
 
 module.exports = {
   startEngine,
