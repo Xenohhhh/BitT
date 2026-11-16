@@ -10,7 +10,6 @@
 #include "torrent_metadata.hpp"
 #include "torrent_manager.hpp"
 
-
 using namespace std;
 using json = nlohmann::json;
 
@@ -251,7 +250,7 @@ bool getTorrentIdParam(
 
     const json &value = params["torrentId"];
     constexpr std::uint64_t maxTorrentId =
-    (std::numeric_limits<std::uint32_t>::max)();
+        (std::numeric_limits<std::uint32_t>::max)();
 
     if (value.is_number_unsigned())
     {
@@ -288,7 +287,8 @@ bool getTorrentIdParam(
 
 json processRequest(
     const json &request,
-    TorrentManager &manager)
+    TorrentManager &manager,
+    bool &shutdownRequested)
 {
     json id = request["id"];
     string method = request["method"].get<string>();
@@ -352,12 +352,7 @@ json processRequest(
             return {
                 {"jsonrpc", "2.0"},
                 {"id", id},
-                {"result", {
-                    {"success", true},
-                    {"torrentId", static_cast<std::uint32_t>(handle.id())},
-                    {"name", handle.status().name}
-                }}
-            };
+                {"result", {{"success", true}, {"torrentId", static_cast<std::uint32_t>(handle.id())}, {"name", handle.status().name}}}};
         }
         catch (const std::exception &e)
         {
@@ -471,6 +466,17 @@ json processRequest(
         }
     }
 
+    // Gracefully shut down the engine.
+    if (method == "shutdown_engine")
+    {
+        shutdownRequested = true;
+
+        return {
+            {"jsonrpc", "2.0"},
+            {"id", id},
+            {"result", {{"success", true}, {"message", "Engine shutdown requested"}}}};
+    }
+
     // Unknown method.
     return makeError(
         id,
@@ -482,7 +488,8 @@ json processRequest(
 void handleClient(
     SOCKET clientSocket,
     const string &expectedToken,
-    TorrentManager &manager)
+    TorrentManager &manager,
+    bool &shutdownRequested)
 {
     cout << "Client connected\n";
 
@@ -546,11 +553,17 @@ void handleClient(
              << loggedRequest.dump(4) << "\n";
 
         // Only authenticated requests reach the method dispatcher.
-        json response = processRequest(request, manager);
+        json response = processRequest(request, manager, shutdownRequested);
 
         if (!sendJson(clientSocket, response))
         {
             cout << "Failed to send response\n";
+            break;
+        }
+
+        if (shutdownRequested)
+        {
+            cout << "Shutdown command received. Closing client session." << endl;
             break;
         }
 
@@ -641,13 +654,16 @@ int main()
         return 1;
     }
 
-    cout << "Engine listening on 127.0.0.1:5000\n";
+    cout << "Engine listening on 127.0.0.1:5000" << endl;
+    cout << "ENGINE_READY" << endl;
 
     // One manager (and one libtorrent session) for the engine lifetime.
     TorrentManager manager;
 
+    bool shutdownRequested = false;
+
     // 7. Accept clients repeatedly.
-    while (true)
+    while (!shutdownRequested)
     {
         SOCKET clientSocket = accept(
             listenSocket,
@@ -664,10 +680,13 @@ int main()
         handleClient(
             clientSocket,
             expectedToken,
-            manager);
+            manager,
+            shutdownRequested);
 
         cout << "Waiting for next client...\n";
     }
+
+    cout << "Shutting down C++ engine..." << endl;
 
     // 8. Cleanup server.
     closesocket(listenSocket);

@@ -7,20 +7,12 @@ const MAX_PAYLOAD = 1024 * 1024;
 const HEADER_SIZE = 4;
 const REQUEST_TIMEOUT_MS = 5000;
 
-const token = process.env.BITT_IPC_TOKEN;
-
-if (!token) {
-  throw new Error(
-    "BITT_IPC_TOKEN must be set to the engine session secret"
-  );
-}
-
-const client = net.createConnection(
-  { host: HOST, port: PORT }
-);
-
+let token = null;
+let client = null;
+let connectionState = "DISCONNECTED";
 let receiveBuffer = Buffer.alloc(0);
 let nextId = 1;
+
 const pendingRequests = new Map();
 
 function createFrame(message) {
@@ -39,8 +31,250 @@ function createFrame(message) {
   return Buffer.concat([header, payload]);
 }
 
-function sendRequest(method, params = {}, timeout = REQUEST_TIMEOUT_MS) {
+function rejectAllPending(error) {
+  for (const { reject, timer } of pendingRequests.values()) {
+    clearTimeout(timer);
+    reject(error);
+  }
+
+  pendingRequests.clear();
+}
+
+function handleEngineCrash(error) {
+  const crashError = error instanceof Error
+    ? error
+    : new Error("C++ engine terminated unexpectedly");
+
+  console.error(
+    "Handling engine crash in TCP client:",
+    crashError.message
+  );
+
+  // Prevent any new requests.
+  connectionState = "DISCONNECTED";
+
+  // Reject all outstanding requests immediately.
+  rejectAllPending(crashError);
+
+  // Close the socket if it is still alive.
+  if (client && !client.destroyed) {
+    client.destroy();
+  }
+}
+
+function handleNotification(notification) {
+  const { method, params } = notification;
+
+  switch (method) {
+    case "torrent_state_changed":
+      console.log("Torrent state changed:", params);
+      break;
+
+    default:
+      console.log("Unknown engine notification:", notification);
+  }
+}
+
+function handleData(chunk) {
+  receiveBuffer = Buffer.concat([
+    receiveBuffer,
+    chunk
+  ]);
+
+  while (receiveBuffer.length >= HEADER_SIZE) {
+    const payloadLength = receiveBuffer.readUInt32BE(0);
+
+    if (
+      payloadLength === 0 ||
+      payloadLength > MAX_PAYLOAD
+    ) {
+      const error = new Error(
+        `Invalid response payload length: ${payloadLength}`
+      );
+
+      console.error(error.message);
+      rejectAllPending(error);
+      client.destroy();
+      return;
+    }
+
+    const frameLength = HEADER_SIZE + payloadLength;
+
+    if (receiveBuffer.length < frameLength) {
+      return;
+    }
+
+    const payload = receiveBuffer.subarray(
+      HEADER_SIZE,
+      frameLength
+    );
+
+    receiveBuffer = receiveBuffer.subarray(frameLength);
+
+    let response;
+
+    try {
+      response = JSON.parse(payload.toString("utf8"));
+    } catch (err) {
+      const error = new Error("Invalid JSON response");
+
+      console.error(error.message);
+      rejectAllPending(error);
+      client.destroy();
+      return;
+    }
+
+    // JSON-RPC notification.
+    if (
+      Object.prototype.hasOwnProperty.call(response, "method") &&
+      !Object.prototype.hasOwnProperty.call(response, "id")
+    ) {
+      handleNotification(response);
+      continue;
+    }
+
+    // JSON-RPC response.
+    if (Object.prototype.hasOwnProperty.call(response, "id")) {
+      const pending = pendingRequests.get(response.id);
+
+      if (!pending) {
+        console.error(
+          "Received response with unknown ID:",
+          response.id
+        );
+        continue;
+      }
+
+      clearTimeout(pending.timer);
+      pendingRequests.delete(response.id);
+
+      if (response.error) {
+        pending.reject(
+          new Error(
+            `${response.error.code}: ${response.error.message}`
+          )
+        );
+      } else {
+        pending.resolve(response.result);
+      }
+
+      continue;
+    }
+
+    console.error(
+      "Received unrecognized JSON-RPC message:",
+      response
+    );
+  }
+}
+
+function connectToEngine() {
+  if (connectionState === "CONNECTED") {
+    return Promise.resolve(client);
+  }
+
+  if (connectionState === "CONNECTING") {
+    return Promise.reject(
+      new Error("Connection attempt already in progress")
+    );
+  }
+
+  token = process.env.BITT_IPC_TOKEN;
+
+  if (!token) {
+    return Promise.reject(
+      new Error(
+        "BITT_IPC_TOKEN must be set to the engine session secret"
+      )
+    );
+  }
+
+  connectionState = "CONNECTING";
+  receiveBuffer = Buffer.alloc(0);
+  nextId = 1;
+
+  client = net.createConnection({
+    host: HOST,
+    port: PORT
+  });
+
   return new Promise((resolve, reject) => {
+    let connectionSettled = false;
+
+    client.on("connect", () => {
+      connectionState = "CONNECTED";
+      console.log("Connected to C++ engine");
+
+      connectionSettled = true;
+      resolve(client);
+    });
+
+    client.on("data", handleData);
+
+    client.on("end", () => {
+      connectionState = "DISCONNECTED";
+
+      console.log("Server ended its sending stream");
+
+      if (receiveBuffer.length !== 0) {
+        console.error(
+          "Connection ended with an incomplete frame"
+        );
+      }
+
+      rejectAllPending(
+        new Error("Server ended the connection")
+      );
+    });
+
+    client.on("error", (err) => {
+      connectionState = "DISCONNECTED";
+
+      console.error("Socket error:", err.message);
+      rejectAllPending(err);
+
+      if (!connectionSettled) {
+        connectionSettled = true;
+        reject(err);
+      }
+    });
+
+    client.on("close", () => {
+      connectionState = "DISCONNECTED";
+
+      console.log("Connection closed");
+
+      rejectAllPending(
+        new Error("Connection closed")
+      );
+
+      if (!connectionSettled) {
+        connectionSettled = true;
+        reject(new Error("Connection closed before connecting"));
+      }
+    });
+  });
+}
+
+function sendRequest(
+  method,
+  params = {},
+  timeout = REQUEST_TIMEOUT_MS
+) {
+  return new Promise((resolve, reject) => {
+    if (
+      connectionState !== "CONNECTED" ||
+      !client ||
+      !client.writable
+    ) {
+      reject(
+        new Error(
+          `Cannot send request: socket is ${connectionState}`
+        )
+      );
+      return;
+    }
+
     const id = nextId++;
 
     const request = {
@@ -60,175 +294,96 @@ function sendRequest(method, params = {}, timeout = REQUEST_TIMEOUT_MS) {
       return;
     }
 
-    pendingRequests.set(id, { resolve, reject, timer });
+    const timer = setTimeout(() => {
+      const pending = pendingRequests.get(id);
+
+      if (!pending) return;
+
+      pendingRequests.delete(id);
+
+      pending.reject(
+        new Error(
+          `Request ${id} timed out after ${timeout}ms`
+        )
+      );
+    }, timeout);
+
+    pendingRequests.set(id, {
+      resolve,
+      reject,
+      timer
+    });
 
     client.write(frame, (err) => {
       if (err) {
         const pending = pendingRequests.get(id);
-        
-        if(!pending) return;
 
-        clearTimeout(pending.timer)
-        pendingRequests.delete(id)
-        pending.reject(err)
+        if (!pending) return;
+
+        clearTimeout(pending.timer);
+        pendingRequests.delete(id);
+        pending.reject(err);
       }
     });
   });
 }
 
-function rejectAllPending(error) {
-  for (const { reject, timer } of pendingRequests.values()) {
-    clearTimeout(timer)
-    reject(error);
-  }
-
-  pendingRequests.clear();
+function shutdownEngine() {
+  return sendRequest("shutdown_engine");
 }
 
 
-function handleNotification(notification) {
-  const { method, params } = notification;
-
-  switch (method) {
-    case "torrent_state_changed":
-      console.log("Torrent state changed:", params);
-
-      // Later, this can update your application's torrent state.
-      break;
-
-    default:
-      console.log("Unknown engine notification:", notification);
+function disconnect(timeout = 1000) {
+  if (!client || client.destroyed) {
+    connectionState = "DISCONNECTED";
+    return Promise.resolve();
   }
-}
 
+  const socket = client;
 
-client.on("connect", async () => {
-  console.log("Connected to C++ engine");
+  return new Promise((resolve) => {
+    let settled = false;
 
-  try {
-    // Multiple requests over the same TCP connection.
-    const status = await sendRequest("get_status");
-    console.log("Status response:", status);
+    function finish() {
+      if (settled) return;
 
-    const secondStatus = await sendRequest("get_status");
-    console.log("Second response:", secondStatus);
+      settled = true;
+      clearTimeout(timer);
+      socket.removeListener("close", finish);
 
-    client.end();
-  } catch (err) {
-    console.error("Request failed:", err.message);
-    client.destroy();
-  }
-});
+      connectionState = "DISCONNECTED";
+      resolve();
+    }
 
-client.on("data", (chunk) => {
-  receiveBuffer = Buffer.concat([
-    receiveBuffer,
-    chunk
-  ]);
+    socket.once("close", finish);
 
-  // Process every complete frame in the buffer.
-  while (receiveBuffer.length >= HEADER_SIZE) {
-    const payloadLength =
-      receiveBuffer.readUInt32BE(0);
-
-    if (payloadLength === 0 || payloadLength > MAX_PAYLOAD) {
-      const error = new Error(
-        `Invalid response payload length: ${payloadLength}`
+    const timer = setTimeout(() => {
+      console.warn(
+        "TCP connection did not close in time. Destroying socket."
       );
 
-      console.error(error.message);
-      rejectAllPending(error);
-      client.destroy();
-      return;
+      socket.destroy();
+      finish();
+    }, timeout);
+
+    if (socket.writable) {
+      socket.end();
+    } else {
+      socket.destroy();
     }
+  });
+}
 
-    const frameLength = HEADER_SIZE + payloadLength;
 
-    // Wait for the complete frame.
-    if (receiveBuffer.length < frameLength) {
-      return;
-    }
+function getConnectionState() {
+  return connectionState;
+}
 
-    const payload = receiveBuffer.subarray(
-      HEADER_SIZE,
-      frameLength
-    );
-
-    // Keep any bytes belonging to later frames.
-    receiveBuffer = receiveBuffer.subarray(frameLength);
-
-    let response;
-
-    try {
-      response = JSON.parse(payload.toString("utf8"));
-    } catch (err) {
-      const error = new Error("Invalid JSON response");
-
-      console.error(error.message);
-      rejectAllPending(error);
-      client.destroy();
-      return;
-    }
-
-    
-    // JSON-RPC notification: has a method but no id.
-    if (
-      Object.prototype.hasOwnProperty.call(response, "method") &&
-      !Object.prototype.hasOwnProperty.call(response, "id")
-    ) {
-      handleNotification(response);
-      continue;
-    }
-
-    // JSON-RPC response: has an id.
-    if (Object.prototype.hasOwnProperty.call(response, "id")) {
-      const pending = pendingRequests.get(response.id);
-
-      if (!pending) {
-        console.error(
-          "Received response with unknown ID:",
-          response.id
-        );
-        continue;
-      }
-      
-      clearTimeout(pending.timer);
-      pendingRequests.delete(response.id);
-
-      if (response.error) {
-        pending.reject(
-          new Error(
-            `${response.error.code}: ${response.error.message}`
-          )
-        );
-      } else {
-        pending.resolve(response.result);
-      }
-
-      continue;
-    }
-
-    console.error("Received unrecognized JSON-RPC message:", response);
-
-  }
-});
-
-client.on("end", () => {
-  console.log("Server ended its sending stream");
-
-  if (receiveBuffer.length !== 0) {
-    console.error("Connection ended with an incomplete frame");
-  }
-
-  rejectAllPending(new Error("Server ended the connection"));
-});
-
-client.on("error", (err) => {
-  console.error("Socket error:", err.message);
-  rejectAllPending(err);
-});
-
-client.on("close", () => {
-  console.log("Connection closed");
-  rejectAllPending(new Error("Connection closed"));
-});
+module.exports = {
+  connectToEngine,
+  sendRequest,
+  shutdownEngine,
+  disconnect,
+  getConnectionState,
+  handleEngineCrash
+};
