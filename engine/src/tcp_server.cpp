@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include "torrent_metadata.hpp"
 #include "torrent_manager.hpp"
+#include "logger.hpp"
 
 using namespace std;
 using json = nlohmann::json;
@@ -23,6 +24,8 @@ enum class RecvStatus
     Error
 };
 
+// Receive exactly the requested number of bytes.
+// Does not read beyond the current header or payload.
 // Receive exactly the requested number of bytes.
 // Does not read beyond the current header or payload.
 RecvStatus recvExact(
@@ -47,8 +50,17 @@ RecvStatus recvExact(
 
         if (bytesReceived == SOCKET_ERROR)
         {
-            cout << "recv failed: "
-                 << WSAGetLastError() << "\n";
+            const int errorCode = WSAGetLastError();
+
+            EngineLogger::error(
+                "tcp-server",
+                "socket_receive_failed",
+                "Failed to receive socket data",
+                {
+                    {"error_code", errorCode},
+                    {"bytes_received", totalReceived},
+                    {"expected_bytes", length}
+                });
 
             return RecvStatus::Error;
         }
@@ -59,6 +71,7 @@ RecvStatus recvExact(
     return RecvStatus::Success;
 }
 
+// Send all bytes, handling partial sends.
 // Send all bytes, handling partial sends.
 bool sendAll(
     SOCKET sock,
@@ -77,15 +90,32 @@ bool sendAll(
 
         if (bytesSent == SOCKET_ERROR)
         {
-            cout << "send failed: "
-                 << WSAGetLastError() << "\n";
+            const int errorCode = WSAGetLastError();
+
+            EngineLogger::error(
+                "tcp-server",
+                "socket_send_failed",
+                "Failed to send socket data",
+                {
+                    {"error_code", errorCode},
+                    {"bytes_sent", totalSent},
+                    {"expected_bytes", length}
+                });
 
             return false;
         }
 
         if (bytesSent == 0)
         {
-            cout << "Connection closed during send\n";
+            EngineLogger::warn(
+                "tcp-server",
+                "socket_send_interrupted",
+                "Connection closed during send",
+                {
+                    {"bytes_sent", totalSent},
+                    {"expected_bytes", length}
+                });
+
             return false;
         }
 
@@ -95,6 +125,7 @@ bool sendAll(
     return true;
 }
 
+// Receive one complete length-prefixed JSON frame.
 // Receive one complete length-prefixed JSON frame.
 bool receiveJson(
     SOCKET sock,
@@ -112,7 +143,10 @@ bool receiveJson(
     {
         if (headerStatus == RecvStatus::Closed)
         {
-            cout << "Client disconnected while reading header\n";
+            EngineLogger::debug(
+                "tcp-server",
+                "connection_closed_during_header",
+                "Client disconnected while reading frame header");
         }
 
         return false;
@@ -125,14 +159,20 @@ bool receiveJson(
     if (payloadLength == 0 ||
         payloadLength > MAX_PAYLOAD)
     {
-        cout << "Invalid payload length: "
-             << payloadLength << "\n";
+        EngineLogger::warn(
+            "tcp-server",
+            "invalid_payload_length",
+            "Received invalid payload length",
+            {
+                {"payload_length", payloadLength},
+                {"maximum_payload", MAX_PAYLOAD}
+            });
 
         return false;
     }
 
     // 4. Receive exactly the payload length.
-    string payload(payloadLength, '\0');
+    string payload(payloadLength, '\\0');
 
     RecvStatus payloadStatus = recvExact(
         sock,
@@ -143,7 +183,13 @@ bool receiveJson(
     {
         if (payloadStatus == RecvStatus::Closed)
         {
-            cout << "Client disconnected during payload\n";
+            EngineLogger::warn(
+                "tcp-server",
+                "connection_closed_during_payload",
+                "Client disconnected before the complete payload arrived",
+                {
+                    {"expected_payload_bytes", payloadLength}
+                });
         }
 
         return false;
@@ -156,8 +202,14 @@ bool receiveJson(
     }
     catch (const json::exception &e)
     {
-        cout << "JSON parse failed: "
-             << e.what() << "\n";
+        EngineLogger::warn(
+            "tcp-server",
+            "json_parse_failed",
+            "Failed to parse incoming JSON payload",
+            {
+                {"error", e.what()},
+                {"payload_bytes", payloadLength}
+            });
 
         return false;
     }
@@ -165,6 +217,7 @@ bool receiveJson(
     return true;
 }
 
+// Serialize JSON and send a framed response.
 // Serialize JSON and send a framed response.
 bool sendJson(
     SOCKET sock,
@@ -174,7 +227,15 @@ bool sendJson(
 
     if (payload.empty() || payload.size() > MAX_PAYLOAD)
     {
-        cout << "Invalid response payload size\n";
+        EngineLogger::error(
+            "tcp-server",
+            "invalid_response_payload",
+            "Response payload size is invalid",
+            {
+                {"payload_bytes", payload.size()},
+                {"maximum_payload", MAX_PAYLOAD}
+            });
+
         return false;
     }
 
@@ -491,7 +552,10 @@ void handleClient(
     TorrentManager &manager,
     bool &shutdownRequested)
 {
-    cout << "Client connected\n";
+    EngineLogger::info(
+        "tcp-server",
+        "client_connected",
+        "Client connected");
 
     while (true)
     {
@@ -549,8 +613,12 @@ void handleClient(
         json loggedRequest = request;
         loggedRequest.erase("token");
 
-        cout << "Received authenticated request:\n"
-             << loggedRequest.dump(4) << "\n";
+        EngineLogger::debug(
+            "tcp-server",
+            "request_authenticated",
+            "Authenticated IPC request",
+            {{"request_id", request["id"]},
+             {"method", request["method"]}});
 
         // Only authenticated requests reach the method dispatcher.
         json response = processRequest(request, manager, shutdownRequested);
@@ -579,11 +647,23 @@ void handleClient(
 
 int main()
 {
+    EngineLogger::initialize();
+
+    EngineLogger::info(
+        "tcp-server",
+        "engine_starting",
+        "BitTorrent engine startup initiated");
+
     // 1. Load the shared IPC secret.
     const char *tokenEnv = getenv("BITT_IPC_TOKEN");
 
     if (tokenEnv == nullptr || strlen(tokenEnv) == 0)
     {
+        EngineLogger::error(
+            "tcp-server",
+            "configuration_error",
+            "BITT_IPC_TOKEN is not configured");
+
         cerr << "BITT_IPC_TOKEN is not configured\n";
         return 1;
     }
@@ -599,6 +679,12 @@ int main()
 
     if (result != 0)
     {
+        EngineLogger::error(
+            "tcp-server",
+            "winsock_initialization_failed",
+            "WSAStartup failed",
+            {{"error_code", result}});
+
         cerr << "WSAStartup failed: "
              << result << "\n";
         return 1;
@@ -612,8 +698,16 @@ int main()
 
     if (listenSocket == INVALID_SOCKET)
     {
+        const int errorCode = WSAGetLastError();
+
+        EngineLogger::error(
+            "tcp-server",
+            "socket_creation_failed",
+            "Failed to create listening socket",
+            {{"error_code", errorCode}});
+
         cerr << "Socket creation failed: "
-             << WSAGetLastError() << "\n";
+             << errorCode << "\n";
 
         WSACleanup();
         return 1;
@@ -633,8 +727,18 @@ int main()
             reinterpret_cast<sockaddr *>(&serverAddr),
             sizeof(serverAddr)) == SOCKET_ERROR)
     {
+        const int errorCode = WSAGetLastError();
+
+        EngineLogger::error(
+            "tcp-server",
+            "socket_bind_failed",
+            "Failed to bind listening socket",
+            {{"error_code", errorCode},
+             {"host", "127.0.0.1"},
+             {"port", 5000}});
+
         cerr << "Bind failed: "
-             << WSAGetLastError() << "\n";
+             << errorCode << "\n";
 
         closesocket(listenSocket);
         WSACleanup();
@@ -646,15 +750,32 @@ int main()
             listenSocket,
             SOMAXCONN) == SOCKET_ERROR)
     {
+        const int errorCode = WSAGetLastError();
+
+        EngineLogger::error(
+            "tcp-server",
+            "socket_listen_failed",
+            "Failed to listen on server socket",
+            {{"error_code", errorCode},
+             {"host", "127.0.0.1"},
+             {"port", 5000}});
+
         cerr << "Listen failed: "
-             << WSAGetLastError() << "\n";
+             << errorCode << "\n";
 
         closesocket(listenSocket);
         WSACleanup();
         return 1;
     }
 
-    cout << "Engine listening on 127.0.0.1:5000" << endl;
+    EngineLogger::info(
+        "tcp-server",
+        "engine_listening",
+        "Engine listening",
+        {{"host", "127.0.0.1"},
+         {"port", 5000}});
+
+    // IMPORTANT: Keep this exact line for Node.js readiness detection.
     cout << "ENGINE_READY" << endl;
 
     // One manager (and one libtorrent session) for the engine lifetime.
@@ -672,8 +793,16 @@ int main()
 
         if (clientSocket == INVALID_SOCKET)
         {
+            const int errorCode = WSAGetLastError();
+
+            EngineLogger::error(
+                "tcp-server",
+                "client_accept_failed",
+                "Failed to accept incoming client connection",
+                {{"error_code", errorCode}});
+
             cerr << "Accept failed: "
-                 << WSAGetLastError() << "\n";
+                 << errorCode << "\n";
             break;
         }
 
@@ -686,11 +815,22 @@ int main()
         cout << "Waiting for next client...\n";
     }
 
+    EngineLogger::info(
+        "tcp-server",
+        "engine_shutdown_started",
+        "Engine shutdown initiated",
+        {{"shutdown_requested", shutdownRequested}});
+
     cout << "Shutting down C++ engine..." << endl;
 
     // 8. Cleanup server.
     closesocket(listenSocket);
     WSACleanup();
+
+    EngineLogger::info(
+        "tcp-server",
+        "engine_stopped",
+        "BitTorrent engine stopped");
 
     return 0;
 }

@@ -10,6 +10,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(LibtorrentRasterbar CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# Structured logging
+include(FetchContent)
+
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.15.3
+)
+
+FetchContent_MakeAvailable(spdlog)
+
 # Existing TCP IPC server
 add_executable(tcp_server
     src/tcp_server.cpp
@@ -26,6 +37,7 @@ target_link_libraries(tcp_server
     PRIVATE
         nlohmann_json::nlohmann_json
         LibtorrentRasterbar::torrent-rasterbar
+        spdlog::spdlog
 )
 
 if(WIN32)
