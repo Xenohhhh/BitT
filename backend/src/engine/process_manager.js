@@ -9,7 +9,7 @@ const { createComponentLogger } = require("../observability/logger");
 const log = createComponentLogger("process-manager");
 const processEvents = new EventEmitter();
 
-const PROJECT_ROOT = path.resolve(__dirname, "../..");
+const PROJECT_ROOT = path.resolve(__dirname, "../../..");
 const ENGINE_DIR = path.join(PROJECT_ROOT, "engine");
 
 const ENGINE_EXECUTABLE =
