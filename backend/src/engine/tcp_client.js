@@ -1,7 +1,7 @@
 
 const net = require("net");
 
-const { createComponentLogger } = require("./observability/logger");
+const { createComponentLogger } = require("../observability/logger");
 
 const log = createComponentLogger("ipc");
 
