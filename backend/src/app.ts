@@ -1,4 +1,5 @@
 import express from "express";
+import torrentRoutes from "./routes/torrent.routes.js";
 
 const app = express();
 
@@ -13,5 +14,7 @@ app.get("/health", (_req, res) => {
     status: "UP"
   });
 });
+
+app.use("/api/torrents", torrentRoutes);
 
 export default app;

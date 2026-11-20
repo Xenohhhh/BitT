@@ -20,7 +20,7 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
     "sourceMap": true,
-    "declaration": true,
+    "declaration": false,
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src/**/*"],

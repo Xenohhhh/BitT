@@ -201,4 +201,21 @@ engine/src/*.exe
 .DS_Store
 Thumbs.db
 
+# Node.js
+node_modules/
+backend/dist/
+
+# SQLite database and runtime files
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
 # End

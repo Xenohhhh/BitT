@@ -13,8 +13,8 @@ TorrentManager::TorrentManager()
 }
 
 lt::torrent_handle TorrentManager::addTorrent(
-    const std::string& torrentPath,
-    const std::string& savePath)
+    const std::string &torrentPath,
+    const std::string &savePath)
 {
     lt::error_code ec;
 
@@ -41,10 +41,13 @@ lt::torrent_handle TorrentManager::addTorrent(
     // 3. Configure download location.
     params.save_path = savePath;
 
-    // 4. Add torrent in paused state.
+    // 4. Disable automatic torrent management.
+    params.flags &= ~lt::torrent_flags::auto_managed;
+
+    // 5. Add torrent in paused state.
     params.flags |= lt::torrent_flags::paused;
 
-    // 5. Add torrent to the existing session.
+    // 6. Add torrent to the existing session.
     lt::torrent_handle handle =
         session_.add_torrent(std::move(params), ec);
 
@@ -96,33 +99,33 @@ nlohmann::json TorrentManager::getTorrentStatus(
 
     switch (status.state)
     {
-        case lt::torrent_status::checking_files:
-            state = "checking_files";
-            break;
+    case lt::torrent_status::checking_files:
+        state = "checking_files";
+        break;
 
-        case lt::torrent_status::downloading_metadata:
-            state = "downloading_metadata";
-            break;
+    case lt::torrent_status::downloading_metadata:
+        state = "downloading_metadata";
+        break;
 
-        case lt::torrent_status::downloading:
-            state = "downloading";
-            break;
+    case lt::torrent_status::downloading:
+        state = "downloading";
+        break;
 
-        case lt::torrent_status::finished:
-            state = "finished";
-            break;
+    case lt::torrent_status::finished:
+        state = "finished";
+        break;
 
-        case lt::torrent_status::seeding:
-            state = "seeding";
-            break;
+    case lt::torrent_status::seeding:
+        state = "seeding";
+        break;
 
-        case lt::torrent_status::checking_resume_data:
-            state = "checking_resume_data";
-            break;
+    case lt::torrent_status::checking_resume_data:
+        state = "checking_resume_data";
+        break;
 
-        default:
-            state = "unknown";
-            break;
+    default:
+        state = "unknown";
+        break;
     }
 
     // 4. Check whether the torrent is paused.
@@ -138,8 +141,7 @@ nlohmann::json TorrentManager::getTorrentStatus(
         {"progress", status.progress},
         {"downloaded", status.total_done},
         {"total", status.total},
-        {"connectedPeers", status.num_peers}
-    };
+        {"connectedPeers", status.num_peers}};
 }
 
 // Pause an existing torrent.
