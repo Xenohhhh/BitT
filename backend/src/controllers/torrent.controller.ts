@@ -1,6 +1,6 @@
 
 import type { Request, Response, NextFunction } from "express";
-import { addTorrent, getAllTorrents, getTorrent, resumeTorrent, pauseTorrent } from "../services/torrent.service.js";
+import { addTorrent, getAllTorrents, getTorrent, resumeTorrent, pauseTorrent, removeTorrent } from "../services/torrent.service.js";
 
 export async function createTorrent(
     req: Request,
@@ -100,4 +100,31 @@ export async function pauseTorrentById(req: Request, res: Response, next: NextFu
     }catch(error){
         next(error)
     }
+}
+
+export async function deleteTorrentById(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const id = req.params.id;
+
+    if (typeof id !== "string" || id.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid torrent ID"
+      });
+      return;
+    }
+
+    await removeTorrent(id);
+
+    res.status(200).json({
+      success: true,
+      message: "Torrent removed successfully"
+    });
+  } catch (error) {
+    next(error);
+  }
 }
