@@ -1,5 +1,6 @@
-#include "torrent_metadata.hpp"
 
+#include "torrent_metadata.hpp"
+#include <sstream>
 #include <iostream>
 #include <libtorrent/torrent_info.hpp>
 #include <libtorrent/file_storage.hpp>
@@ -35,6 +36,25 @@ json inspectTorrent(const std::string &torrentPath)
 
     const lt::torrent_info &ti = *params.ti;
 
+    // Extract torrent identity.
+    const auto hashes = ti.info_hashes();
+
+    json infoHashes = json::object();
+
+    if (!hashes.v1.is_all_zeros())
+    {
+        std::ostringstream v1Stream;
+        v1Stream << hashes.v1;
+        infoHashes["v1"] = v1Stream.str();
+    }
+
+    if (!hashes.v2.is_all_zeros())
+    {
+        std::ostringstream v2Stream;
+        v2Stream << hashes.v2;
+        infoHashes["v2"] = v2Stream.str();
+    }
+
     // Extract general metadata.
     json metadata;
 
@@ -42,6 +62,7 @@ json inspectTorrent(const std::string &torrentPath)
     metadata["totalSize"] = ti.total_size();
     metadata["pieceCount"] = ti.num_pieces();
     metadata["pieceLength"] = ti.piece_length();
+    metadata["infoHashes"] = infoHashes;
 
     // Extract file information.
     const lt::file_storage &fs = ti.layout();

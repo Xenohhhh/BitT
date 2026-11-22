@@ -10,6 +10,7 @@ import {
 import type {
     TorrentRecord
 } from "../repositories/torrent.repository.js";
+import { db } from "../database/connection.js";
 
 // Application-level error with an HTTP-compatible status code.
 export class TorrentServiceError extends Error {
@@ -276,4 +277,16 @@ export async function removeTorrent(
             "Torrent was removed from engine but database deletion failed"
         );
     }
+}
+
+export function clearEngineId(id: string): boolean {
+  const statement = db.prepare(`
+    UPDATE torrents
+    SET engine_id = NULL
+    WHERE id = ?
+  `);
+
+  const result = statement.run(id);
+
+  return result.changes > 0;
 }

@@ -3,6 +3,7 @@ import {
   initializeEngine,
   shutdownEngine
 } from "./engine/engine.client.js";
+import { recoverTorrents } from "./services/recovery.service.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -15,6 +16,8 @@ async function startServer(): Promise<void> {
     await initializeEngine();
 
     console.log("C++ engine initialized successfully");
+
+    await recoverTorrents();
 
     // Start accepting HTTP requests only after engine initialization.
     server = app.listen(PORT, () => {

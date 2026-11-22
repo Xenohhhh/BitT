@@ -1,10 +1,11 @@
+
 import { db } from "../database/connection.js";
 
 export type TorrentDesiredState = "paused" | "active";
 
 export interface TorrentRecord {
   id: string;
-  engine_id: number;
+  engine_id: number | null;
   name: string;
   torrent_path: string;
   save_path: string;
@@ -92,6 +93,48 @@ export function findAll(): TorrentRecord[] {
 
   return statement.all() as TorrentRecord[];
 }
+
+export function updateEngineId(
+  id: string,
+  engineId: number
+): boolean {
+  const statement = db.prepare(`
+    UPDATE torrents
+    SET engine_id = ?,
+        updated_at = ?
+    WHERE id = ?
+  `);
+
+  const result = statement.run(
+    engineId,
+    new Date().toISOString(),
+    id
+  );
+
+  return result.changes > 0;
+}
+
+export function clearEngineIds(): void {
+  const statement = db.prepare(`
+    UPDATE torrents
+    SET engine_id = NULL
+  `);
+
+  statement.run();
+}
+
+export function clearEngineId(id: string): boolean {
+  const statement = db.prepare(`
+    UPDATE torrents
+    SET engine_id = NULL
+    WHERE id = ?
+  `);
+
+  const result = statement.run(id);
+
+  return result.changes > 0;
+}
+
 
 export function updateDesiredState(
   id: string,
