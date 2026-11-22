@@ -10,6 +10,7 @@ import {
 import type {
     TorrentRecord
 } from "../repositories/torrent.repository.js";
+
 import { db } from "../database/connection.js";
 
 // Application-level error with an HTTP-compatible status code.
@@ -34,6 +35,17 @@ interface EngineAddResult {
     name: string;
 }
 
+interface TorrentInspectionResult {
+    success: boolean;
+    metadata: {
+        name: string;
+        infoHashes: {
+            v1?: string | undefined;
+            v2?: string | undefined;
+        };
+    };
+}
+
 function isObject(
     value: unknown
 ): value is Record<string, unknown> {
@@ -55,6 +67,56 @@ function validatePath(
     }
 
     return value.trim();
+}
+
+function validateTorrentInspection(
+    response: unknown
+): TorrentInspectionResult {
+    if (!isObject(response) || response.success !== true) {
+        throw new TorrentServiceError(
+            "Failed to inspect torrent metadata",
+            400
+        );
+    }
+
+    const metadata = response.metadata;
+
+    if (!isObject(metadata) || typeof metadata.name !== "string") {
+        throw new Error("Invalid torrent inspection metadata");
+    }
+
+    const infoHashes = metadata.infoHashes;
+
+    if (!isObject(infoHashes)) {
+        throw new Error("Torrent info hashes are missing");
+    }
+
+    const v1 = infoHashes.v1;
+    const v2 = infoHashes.v2;
+
+    if (
+        (v1 !== undefined &&
+            (typeof v1 !== "string" || !/^[a-fA-F0-9]{40}$/.test(v1))) ||
+        (v2 !== undefined &&
+            (typeof v2 !== "string" || !/^[a-fA-F0-9]{64}$/.test(v2)))
+    ) {
+        throw new Error("Invalid torrent info hash format");
+    }
+
+    if (v1 === undefined && v2 === undefined) {
+        throw new Error("Torrent does not contain a valid info hash");
+    }
+
+    return {
+        success: true,
+        metadata: {
+            name: metadata.name,
+            infoHashes: {
+                v1: v1 as string | undefined,
+                v2: v2 as string | undefined
+            }
+        }
+    };
 }
 
 function validateEngineAddResult(
@@ -106,6 +168,37 @@ export async function addTorrent(
         "savePath"
     );
 
+    // Inspect the torrent before adding it to the engine.
+    const inspectionResponse = await sendEngineRequest(
+        "inspect_torrent",
+        {
+            torrentPath
+        }
+    );
+
+    const inspectionResult = validateTorrentInspection(
+        inspectionResponse
+    );
+
+    const infoHashV1 =
+        inspectionResult.metadata.infoHashes.v1 ?? null;
+
+    const infoHashV2 =
+        inspectionResult.metadata.infoHashes.v2 ?? null;
+
+    // Prevent duplicate torrents from being added.
+    const existingTorrent = torrentRepository.findByInfoHashes(
+        infoHashV1,
+        infoHashV2
+    );
+
+    if (existingTorrent) {
+        throw new TorrentServiceError(
+            "This torrent has already been added",
+            409
+        );
+    }
+
     // Ask the C++ engine to add the torrent.
     // The engine initially adds torrents in a paused state.
     const response = await sendEngineRequest(
@@ -122,13 +215,15 @@ export async function addTorrent(
     const applicationId = randomUUID();
 
     try {
-        // Persist the torrent in SQLite.
+        // Persist the torrent and its info hashes in SQLite.
         return torrentRepository.create({
             id: applicationId,
             engine_id: engineResult.torrentId,
             name: engineResult.name,
             torrent_path: torrentPath,
-            save_path: savePath
+            save_path: savePath,
+            info_hash_v1: infoHashV1,
+            info_hash_v2: infoHashV2
         });
     } catch (databaseError) {
         // The engine succeeded, but persistence failed.
@@ -157,9 +252,7 @@ export function getAllTorrents(): TorrentRecord[] {
 }
 
 // Retrieve one torrent and its current engine status.
-export async function getTorrent(
-    id: string
-) {
+export async function getTorrent(id: string) {
     const torrent = torrentRepository.findById(id);
 
     if (!torrent) {
@@ -183,8 +276,9 @@ export async function getTorrent(
 }
 
 // Pause a torrent.
-
-export async function pauseTorrent(id: string): Promise<TorrentRecord> {
+export async function pauseTorrent(
+    id: string
+): Promise<TorrentRecord> {
     const torrent = torrentRepository.findById(id);
 
     if (!torrent) {
@@ -216,7 +310,9 @@ export async function pauseTorrent(id: string): Promise<TorrentRecord> {
     return updatedTorrent;
 }
 
-export async function resumeTorrent(id: string): Promise<TorrentRecord> {
+export async function resumeTorrent(
+    id: string
+): Promise<TorrentRecord> {
     const torrent = torrentRepository.findById(id);
 
     if (!torrent) {
@@ -247,7 +343,6 @@ export async function resumeTorrent(id: string): Promise<TorrentRecord> {
 
     return updatedTorrent;
 }
-
 
 // Remove a torrent from the engine and database.
 // Downloaded files are not explicitly deleted.
@@ -280,13 +375,13 @@ export async function removeTorrent(
 }
 
 export function clearEngineId(id: string): boolean {
-  const statement = db.prepare(`
-    UPDATE torrents
-    SET engine_id = NULL
-    WHERE id = ?
-  `);
+    const statement = db.prepare(`
+        UPDATE torrents
+        SET engine_id = NULL
+        WHERE id = ?
+    `);
 
-  const result = statement.run(id);
+    const result = statement.run(id);
 
-  return result.changes > 0;
+    return result.changes > 0;
 }
