@@ -19,11 +19,17 @@ int main()
 
         std::cout << "Adding torrent...\n";
 
-        lt::torrent_handle handle = manager.addTorrent(
+        AddTorrentResult result = manager.addTorrent(
             "./test-data/ubuntu.torrent",
             "./test-downloads");
 
+        lt::torrent_handle handle = result.handle;
+
         std::cout << "Torrent added successfully!\n";
+
+        std::cout << "New torrent added: "
+                  << std::boolalpha
+                  << result.added << '\n';
 
         // Retrieve torrent ID.
         int torrentId = handle.id();
@@ -32,7 +38,6 @@ int main()
                   << torrentId << '\n';
 
         std::cout << "Handle valid: "
-                  << std::boolalpha
                   << handle.is_valid() << '\n';
 
         // 1. Retrieve initial torrent status.
@@ -43,12 +48,11 @@ int main()
 
         std::cout << status.dump(4) << '\n';
 
-        // 1. Resume torrent
+        // 2. Resume torrent.
         std::cout << "\nResuming torrent...\n";
 
         manager.resumeTorrent(torrentId);
 
-        // Wait until libtorrent reflects the resumed state.
         bool resumed = false;
 
         for (int i = 0; i < 50; i++)
@@ -76,7 +80,7 @@ int main()
         status = manager.getTorrentStatus(torrentId);
         std::cout << status.dump(4) << '\n';
 
-        // 2. Pause torrent again
+        // 3. Pause torrent again.
         std::cout << "\nPausing torrent again...\n";
 
         manager.pauseTorrent(torrentId);
@@ -105,7 +109,7 @@ int main()
 
         std::cout << "Torrent paused successfully!\n";
 
-        // 3. Remove torrent
+        // 4. Remove torrent.
         std::cout << "\nRemoving torrent...\n";
 
         manager.removeTorrent(torrentId);

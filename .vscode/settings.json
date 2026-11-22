@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/stvks/Downloads/Practice/New folder/BitT/engine"
+    "cmake.sourceDirectory": "C:/Users/stvks/Downloads/Practice/New folder/BitT/engine",
+    "C_Cpp.errorSquiggles": "disabled"
 }

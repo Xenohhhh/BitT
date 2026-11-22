@@ -56,11 +56,9 @@ RecvStatus recvExact(
                 "tcp-server",
                 "socket_receive_failed",
                 "Failed to receive socket data",
-                {
-                    {"error_code", errorCode},
-                    {"bytes_received", totalReceived},
-                    {"expected_bytes", length}
-                });
+                {{"error_code", errorCode},
+                 {"bytes_received", totalReceived},
+                 {"expected_bytes", length}});
 
             return RecvStatus::Error;
         }
@@ -96,11 +94,9 @@ bool sendAll(
                 "tcp-server",
                 "socket_send_failed",
                 "Failed to send socket data",
-                {
-                    {"error_code", errorCode},
-                    {"bytes_sent", totalSent},
-                    {"expected_bytes", length}
-                });
+                {{"error_code", errorCode},
+                 {"bytes_sent", totalSent},
+                 {"expected_bytes", length}});
 
             return false;
         }
@@ -111,10 +107,8 @@ bool sendAll(
                 "tcp-server",
                 "socket_send_interrupted",
                 "Connection closed during send",
-                {
-                    {"bytes_sent", totalSent},
-                    {"expected_bytes", length}
-                });
+                {{"bytes_sent", totalSent},
+                 {"expected_bytes", length}});
 
             return false;
         }
@@ -163,10 +157,8 @@ bool receiveJson(
             "tcp-server",
             "invalid_payload_length",
             "Received invalid payload length",
-            {
-                {"payload_length", payloadLength},
-                {"maximum_payload", MAX_PAYLOAD}
-            });
+            {{"payload_length", payloadLength},
+             {"maximum_payload", MAX_PAYLOAD}});
 
         return false;
     }
@@ -187,9 +179,7 @@ bool receiveJson(
                 "tcp-server",
                 "connection_closed_during_payload",
                 "Client disconnected before the complete payload arrived",
-                {
-                    {"expected_payload_bytes", payloadLength}
-                });
+                {{"expected_payload_bytes", payloadLength}});
         }
 
         return false;
@@ -206,10 +196,8 @@ bool receiveJson(
             "tcp-server",
             "json_parse_failed",
             "Failed to parse incoming JSON payload",
-            {
-                {"error", e.what()},
-                {"payload_bytes", payloadLength}
-            });
+            {{"error", e.what()},
+             {"payload_bytes", payloadLength}});
 
         return false;
     }
@@ -231,10 +219,8 @@ bool sendJson(
             "tcp-server",
             "invalid_response_payload",
             "Response payload size is invalid",
-            {
-                {"payload_bytes", payload.size()},
-                {"maximum_payload", MAX_PAYLOAD}
-            });
+            {{"payload_bytes", payload.size()},
+             {"maximum_payload", MAX_PAYLOAD}});
 
         return false;
     }
@@ -406,14 +392,16 @@ json processRequest(
 
         try
         {
-            lt::torrent_handle handle = manager.addTorrent(
+            AddTorrentResult addResult = manager.addTorrent(
                 params["torrentPath"].get<string>(),
                 params["savePath"].get<string>());
+
+            const auto &handle = addResult.handle;
 
             return {
                 {"jsonrpc", "2.0"},
                 {"id", id},
-                {"result", {{"success", true}, {"torrentId", static_cast<std::uint32_t>(handle.id())}, {"name", handle.status().name}}}};
+                {"result", {{"success", true}, {"torrentId", static_cast<std::uint32_t>(handle.id())}, {"name", handle.status().name}, {"added", addResult.added}, {"alreadyExists", !addResult.added}}}};
         }
         catch (const std::exception &e)
         {
