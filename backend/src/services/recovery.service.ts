@@ -1,3 +1,4 @@
+
 import {
   findAll,
   clearEngineIds,
@@ -87,22 +88,20 @@ async function recoverTorrent(
       `[Recovery] Restored "${torrent.name}" (engine ID: ${newEngineId}, desired state: ${torrent.desired_state})`
     );
   } catch (error) {
-    // If the torrent was added but recovery subsequently failed,
-    // attempt to remove it from the engine.
+    // Do not remove the engine handle here.
+    //
+    // The engine response does not tell us whether the returned
+    // handle was newly created or already existed. Removing it
+    // could accidentally affect another recovered torrent.
+    //
+    // Leave the handle untouched and clear this record's
+    // database mapping. Any orphaned handle will be discarded
+    // when the engine process is restarted.
+
     if (newEngineId !== undefined) {
-      try {
-        await sendEngineRequest(
-          "remove_torrent",
-          {
-            torrentId: newEngineId
-          }
-        );
-      } catch (cleanupError) {
-        console.error(
-          `[Recovery] Could not remove partially recovered torrent "${torrent.name}":`,
-          cleanupError
-        );
-      }
+      console.warn(
+        `[Recovery] Torrent "${torrent.name}" failed after receiving engine ID ${newEngineId}. The engine handle was left untouched because ownership could not be confirmed.`
+      );
     }
 
     // Keep the permanent SQLite record, but mark it as
