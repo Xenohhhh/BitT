@@ -33,6 +33,8 @@ interface EngineAddResult {
     success: boolean;
     torrentId: number;
     name: string;
+    added: boolean;
+    alreadyExists: boolean;
 }
 
 interface TorrentInspectionResult {
@@ -126,7 +128,13 @@ function validateEngineAddResult(
         throw new Error("Invalid engine response");
     }
 
-    const { success, torrentId, name } = response;
+    const {
+        success,
+        torrentId,
+        name,
+        added,
+        alreadyExists
+    } = response;
 
     if (
         success !== true ||
@@ -135,7 +143,10 @@ function validateEngineAddResult(
         torrentId < 0 ||
         torrentId > 0xFFFFFFFF ||
         typeof name !== "string" ||
-        name.length === 0
+        name.length === 0 ||
+        typeof added !== "boolean" ||
+        typeof alreadyExists !== "boolean" ||
+        added === alreadyExists
     ) {
         throw new Error("Invalid add_torrent response");
     }
@@ -143,7 +154,9 @@ function validateEngineAddResult(
     return {
         success,
         torrentId,
-        name
+        name,
+        added,
+        alreadyExists
     };
 }
 
@@ -186,7 +199,7 @@ export async function addTorrent(
     const infoHashV2 =
         inspectionResult.metadata.infoHashes.v2 ?? null;
 
-    // Prevent duplicate torrents from being added.
+    // First layer of duplicate protection: SQLite.
     const existingTorrent = torrentRepository.findByInfoHashes(
         infoHashV1,
         infoHashV2
@@ -199,8 +212,7 @@ export async function addTorrent(
         );
     }
 
-    // Ask the C++ engine to add the torrent.
-    // The engine initially adds torrents in a paused state.
+    // Second layer of duplicate protection: C++ engine.
     const response = await sendEngineRequest(
         "add_torrent",
         {
@@ -211,7 +223,16 @@ export async function addTorrent(
 
     const engineResult = validateEngineAddResult(response);
 
-    // Generate a permanent application-level identifier.
+    // The engine found an existing torrent.
+    // Do not create another SQLite record or remove its engine handle.
+    if (engineResult.alreadyExists) {
+        throw new TorrentServiceError(
+            "This torrent already exists in the engine",
+            409
+        );
+    }
+
+    // At this point, the engine has confirmed a new addition.
     const applicationId = randomUUID();
 
     try {
@@ -226,20 +247,22 @@ export async function addTorrent(
             info_hash_v2: infoHashV2
         });
     } catch (databaseError) {
-        // The engine succeeded, but persistence failed.
-        // Attempt to compensate by removing the engine torrent.
-        try {
-            await sendEngineRequest(
-                "remove_torrent",
-                {
-                    torrentId: engineResult.torrentId
-                }
-            );
-        } catch (cleanupError) {
-            console.error(
-                "Failed to compensate after database failure:",
-                cleanupError
-            );
+        // Compensate only when this request actually created
+        // a new engine torrent.
+        if (engineResult.added) {
+            try {
+                await sendEngineRequest(
+                    "remove_torrent",
+                    {
+                        torrentId: engineResult.torrentId
+                    }
+                );
+            } catch (cleanupError) {
+                console.error(
+                    "Failed to compensate after database failure:",
+                    cleanupError
+                );
+            }
         }
 
         throw databaseError;
