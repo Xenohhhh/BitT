@@ -102,3 +102,19 @@ target_link_libraries(torrent_add_test
     PRIVATE
         LibtorrentRasterbar::torrent-rasterbar
 )
+
+# Torrent duplicate detection test
+add_executable(torrent_duplicate_test
+    src/torrent_duplicate_test.cpp
+    src/torrent_manager.cpp
+)
+
+target_include_directories(torrent_duplicate_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(torrent_duplicate_test
+    PRIVATE
+        LibtorrentRasterbar::torrent-rasterbar
+)
